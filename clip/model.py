@@ -90,9 +90,9 @@ class AttentionPool2d(nn.Module):
         return x[0]
 
 class EcaNfNetL0(nn.Module):
-    def __init__(self, output_dim, heads, input_resolution=224):
+    def __init__(self, output_dim, heads, input_resolution=224, pretrained=False):
         super().__init__()
-        self.backbone = timm.create_model("eca_nfnet_l0", pretrained=True)
+        self.backbone = timm.create_model("eca_nfnet_l0", pretrained=pretrained)
         self.embed_dim = self.backbone.head.fc.in_features
         self.backbone.head = nn.Identity()
 
@@ -269,7 +269,8 @@ class CLIP(nn.Module):
                  transformer_width: int,
                  transformer_heads: int,
                  transformer_layers: int,
-                 model_name: str
+                 model_name: str,
+                 pretrained=False
                  ):
         super().__init__()
 
@@ -279,7 +280,8 @@ class CLIP(nn.Module):
             self.visual = EcaNfNetL0(
                 output_dim=embed_dim,
                 heads=vision_width * 32 // 64,
-                input_resolution=image_resolution
+                input_resolution=image_resolution,
+                pretrained=pretrained
             )
         elif isinstance(vision_layers, (tuple, list)):
             vision_heads = vision_width * 32 // 64
@@ -419,7 +421,7 @@ def convert_weights(model: nn.Module):
     model.apply(_convert_weights_to_fp16)
 
 
-def build_model(state_dict: dict, input_size, model_name, force_load=False):
+def build_model(state_dict: dict, input_size, model_name, force_load=False, pretrained=False):
     vit = "visual.proj" in state_dict
 
     if model_name == "eca_nfnet_l0":
@@ -464,7 +466,8 @@ def build_model(state_dict: dict, input_size, model_name, force_load=False):
     model = CLIP(
         embed_dim,
         image_resolution, vision_layers, vision_width, vision_patch_size,
-        context_length, vocab_size, transformer_width, transformer_heads, transformer_layers, model_name
+        context_length, vocab_size, transformer_width, transformer_heads,
+        transformer_layers, model_name, pretrained
     )
 
     for key in ["input_resolution", "context_length", "vocab_size"]:
