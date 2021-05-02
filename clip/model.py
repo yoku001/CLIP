@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+import timm
 
 class Bottleneck(nn.Module):
     expansion = 4
@@ -87,6 +88,25 @@ class AttentionPool2d(nn.Module):
         )
 
         return x[0]
+
+class EcaNfNetL0(nn.Module):
+    def __init__(self, output_dim, heads, input_resolution=224):
+        super().__init__()
+        self.backbone = timm.create_model("eca_nfnet_l0", pretrained=True)
+        self.embed_dim = self.backbone.head.fc.in_features
+        self.backbone.head = nn.Identity()
+
+        self.output_dim = output_dim
+        self.input_resolution = input_resolution
+
+        # embed_dim = width * 32  # the ResNet feature dimension
+        self.attnpool = AttentionPool2d(input_resolution // 31, self.embed_dim, heads, output_dim)
+
+    def forward(self, x):
+        x = self.backbone(x)
+        x = self.attnpool(x)
+
+        return x
 
 
 class ModifiedResNet(nn.Module):
@@ -248,14 +268,22 @@ class CLIP(nn.Module):
                  vocab_size: int,
                  transformer_width: int,
                  transformer_heads: int,
-                 transformer_layers: int
+                 transformer_layers: int,
+                 model_name: str
                  ):
         super().__init__()
 
         self.context_length = context_length
 
-        if isinstance(vision_layers, (tuple, list)):
+        if model_name is not None:
+            self.visual = EcaNfNetL0(
+                output_dim=embed_dim,
+                heads=vision_width * 32 // 64,
+                input_resolution=image_resolution
+            )
+        elif isinstance(vision_layers, (tuple, list)):
             vision_heads = vision_width * 32 // 64
+            print(vision_heads)
             self.visual = ModifiedResNet(
                 layers=vision_layers,
                 output_dim=embed_dim,
@@ -330,19 +358,19 @@ class CLIP(nn.Module):
 
     @property
     def dtype(self):
-        return self.visual.conv1.weight.dtype
+        return self.stem.conv1.weight.dtype
 
     def encode_image(self, image):
-        return self.visual(image.type(self.dtype))
+        return self.visual(image)
 
     def encode_text(self, text):
-        x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
+        x = self.token_embedding(text)  # [batch_size, n_ctx, d_model]
 
-        x = x + self.positional_embedding.type(self.dtype)
+        x = x + self.positional_embedding
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
-        x = self.ln_final(x).type(self.dtype)
+        x = self.ln_final(x)
 
         # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
@@ -391,10 +419,15 @@ def convert_weights(model: nn.Module):
     model.apply(_convert_weights_to_fp16)
 
 
-def build_model(state_dict: dict, input_size):
+def build_model(state_dict: dict, input_size, model_name, force_load=False):
     vit = "visual.proj" in state_dict
 
-    if vit:
+    if model_name == "eca_nfnet_l0":
+        vision_width = 64
+        vision_layers = None
+        vision_patch_size = 0
+        image_resolution = input_size
+    elif vit:
         vision_width = state_dict["visual.conv1.weight"].shape[0]
         vision_layers = len([k for k in state_dict.keys() if k.startswith("visual.") and k.endswith(".attn.in_proj_weight")])
         vision_patch_size = state_dict["visual.conv1.weight"].shape[-1]
@@ -416,14 +449,22 @@ def build_model(state_dict: dict, input_size):
     transformer_heads = transformer_width // 64
     transformer_layers = len(set(k.split(".")[2] for k in state_dict if k.startswith(f"transformer.resblocks")))
 
-    if input_size is not None:
-        image_resolution = input_size
-        del state_dict["visual.attnpool.positional_embedding"]
+    if force_load:
+        if input_size is not None:
+            print("delete state: visual.attnpool.positional_embedding")
+            image_resolution = input_size
+            del state_dict["visual.attnpool.positional_embedding"]
+
+        if model_name is not None:
+            print("delete state: visual.attnpool.*")
+            del_keys = [k for k in state_dict.keys() if k.startswith('visual.attnpool')]
+            for k in del_keys:
+                del state_dict[k]
 
     model = CLIP(
         embed_dim,
         image_resolution, vision_layers, vision_width, vision_patch_size,
-        context_length, vocab_size, transformer_width, transformer_heads, transformer_layers
+        context_length, vocab_size, transformer_width, transformer_heads, transformer_layers, model_name
     )
 
     for key in ["input_resolution", "context_length", "vocab_size"]:
