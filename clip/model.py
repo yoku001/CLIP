@@ -6,7 +6,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-
 class Bottleneck(nn.Module):
     expansion = 4
 
@@ -392,7 +391,7 @@ def convert_weights(model: nn.Module):
     model.apply(_convert_weights_to_fp16)
 
 
-def build_model(state_dict: dict):
+def build_model(state_dict: dict, input_size):
     vit = "visual.proj" in state_dict
 
     if vit:
@@ -417,6 +416,10 @@ def build_model(state_dict: dict):
     transformer_heads = transformer_width // 64
     transformer_layers = len(set(k.split(".")[2] for k in state_dict if k.startswith(f"transformer.resblocks")))
 
+    if input_size is not None:
+        image_resolution = input_size
+        del state_dict["visual.attnpool.positional_embedding"]
+
     model = CLIP(
         embed_dim,
         image_resolution, vision_layers, vision_width, vision_patch_size,
@@ -427,6 +430,6 @@ def build_model(state_dict: dict):
         if key in state_dict:
             del state_dict[key]
 
-    convert_weights(model)
-    model.load_state_dict(state_dict)
-    return model.eval()
+    # convert_weights(model)
+    model.load_state_dict(state_dict, strict=False)
+    return model
